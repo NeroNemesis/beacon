@@ -1,0 +1,60 @@
+# Semaine 6-7 : infra (Bicep) + image (ACR) + application (Container Apps). what-if sur les PR.
+# Variables : RESOURCE_GROUP, ENTRA_ADMIN_LOGIN, ENTRA_ADMIN_OBJECT_ID
+# Secrets : AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID, ALERT_WEBHOOK_KEY
+name: deploy
+on:
+  pull_request:
+    branches: [main]
+    paths: ['infra/**', 'src/**', 'Dockerfile', '.github/workflows/deploy.yml']
+  push:
+    branches: [main]
+    paths: ['infra/**', 'src/**', 'Dockerfile', '.github/workflows/deploy.yml']
+  workflow_dispatch:
+permissions:
+  id-token: write
+  contents: read
+env:
+  RG: ${{ vars.RESOURCE_GROUP }}
+  IMAGE_NAME: beacon-api
+  ENTRA_ADMIN_LOGIN: ${{ vars.ENTRA_ADMIN_LOGIN }}
+  ENTRA_ADMIN_OBJECT_ID: ${{ vars.ENTRA_ADMIN_OBJECT_ID }}
+  ALERT_WEBHOOK_KEY: ${{ secrets.ALERT_WEBHOOK_KEY }}
+jobs:
+  whatif:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: What-if (aperçu des changements, rien n'est modifié)
+        run: az deployment group what-if -g "$RG" -f infra/main.bicep -p infra/main.dev.bicepparam
+  deploy:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: 1. Infrastructure (sans l'application)
+        run: az deployment group create -g "$RG" -f infra/main.bicep -p infra/main.dev.bicepparam -n "infra-${{ github.run_number }}"
+      - name: 2. Construire et pousser l'image
+        run: |
+          ACR_LOGIN=$(az acr list -g "$RG" --query "[0].loginServer" -o tsv)
+          az acr login --name "${ACR_LOGIN%%.*}"
+          docker build -t "$ACR_LOGIN/$IMAGE_NAME:${{ github.sha }}" .
+          docker push "$ACR_LOGIN/$IMAGE_NAME:${{ github.sha }}"
+          echo "CONTAINER_IMAGE=$ACR_LOGIN/$IMAGE_NAME:${{ github.sha }}" >> "$GITHUB_ENV"
+      - name: 3. Déployer l'application (nouvelle révision)
+        run: az deployment group create -g "$RG" -f infra/main.bicep -p infra/main.dev.bicepparam -n "app-${{ github.run_number }}"
+      - name: 4. Smoke test
+        run: |
+          FQDN=$(az containerapp list -g "$RG" --query "[0].properties.configuration.ingress.fqdn" -o tsv)
+          curl --fail --silent --show-error --retry 10 --retry-delay 6 --retry-all-errors "https://$FQDN/health/ready"

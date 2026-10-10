@@ -1,0 +1,2 @@
+date,problem_id,title,pattern,minutes,solved_alone,mistake_or_insight,redo_on
+2026-10-27,217,Contains Duplicate,hash set,12,yes,"set() suffices; O(n)",2026-10-30
